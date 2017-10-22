@@ -7,6 +7,40 @@ function isPromise (result) {
     typeof result.then === 'function';
 }
 
+
+// from 'feather-common/hooks'
+const indexes = {
+  find: 0,
+  create: 1,
+  get: 1,
+  remove: 1,
+  update: 2,
+  patch: 2
+}
+
+function inheritStack (args, parentObject, action) {
+  const __stacks = parentObject ? parentObject.__stack : []
+  const index = indexes[action]
+  if (index && args[index]) {
+    Object.assign(args[index], {__stacks })
+  }
+}
+
+function patchService (service, hookObject) {
+  return new Proxy(service, {
+    get(target, key) {
+      if(indexes[key] != undefined) {
+        return function (...args) {
+          inheritStack(args, hookObject, key)
+          return target[key](...args)
+        }
+      } else {
+        return target[key]
+      }
+    }
+  })
+}
+
 function hookMixin (service) {
   if (typeof service.hooks === 'function') {
     return;
@@ -50,6 +84,30 @@ function hookMixin (service) {
       };
       // Create the hook object that gets passed through
       const hookObject = utils.hookObject(method, 'before', arguments, hookData);
+      // HACK: we add a homebrew __stack here to help analysis the performance and spot the error
+      if (hookObject.params && hookObject.params.__stack) {
+        hookObject.__stacks = hookObject.params.__stacks
+        console.log('inherited from parent stack')
+        delete hookObject.params.__stacks
+      } else {
+        hookObject.__stacks = []
+      }
+      // FIXME: find a options to set tracing dynamically
+      hookObject.__tracing = true
+
+      hookObject.service = patchService(hookObject.service, hookObject)
+      const originalServiceFactory = hookObject.app.service
+      hookObject.app = new Proxy(hookObject.app, {
+        get(target, key) {
+          if (key == 'service') {
+            return function patchedService() {
+              return patchService(target[key].apply(target, arguments), hookObject)
+            }
+          }
+          return target[key]
+        }
+      })
+
       // Get all hooks
       const hooks = {
         // For before hooks the app hooks will run first
