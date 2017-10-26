@@ -6,6 +6,28 @@ export function isHookObject (hookObject) {
     typeof hookObject.type === 'string';
 }
 
+export function traceObject (obj) {
+  if (obj) {
+    return obj
+  } else {
+    return {
+      stack: [],
+      start: null
+    }
+  }
+}
+
+
+export function insertTrace(hook, name) {
+  name = `${hook.path}:${hook.method}:` + name
+  if (process.env.TRACE_TIME) {
+    hook.__trace.stack.push({name, time: process.hrtime(hook.__trace.start)})
+  } else {
+    hook.__trace.stack.push({name})
+  }
+}
+
+
 export function processHooks (hooks, initialHookObject) {
   let hookObject = initialHookObject;
   let updateCurrentHook = current => {
@@ -20,9 +42,6 @@ export function processHooks (hooks, initialHookObject) {
     return hookObject;
   };
   let promise = Promise.resolve(hookObject);
-  if (hookObject.__tracing) {
-    hookObject.__start = new Date()
-  }
 
   // Go through all hooks and chain them into our promise
   hooks.forEach((fn, index) => {
@@ -39,15 +58,7 @@ export function processHooks (hooks, initialHookObject) {
       promise = promise.then(hook);
     }
     promise = promise.then(() => {
-      const hookName = `hook:${hookObject.path}:${hookObject.type}:[${index}]-${fn.name || 'anonymousHook'}`
-      const frame = {
-        name: hookName
-      }
-      if (hookObject.__tracing) {
-        frame.now = new Date()
-      }
-      // console.log(`${hookObject.__stacks.length} ${hookName} ${hookObject.__tracing? frame.now - hookObject.__start : ''}`)
-      hookObject.__stacks.push(frame)
+      insertTrace(hookObject, `${hookObject.type}:[${index}] - ${fn.name || 'anonymousHook'}`)
     })
     // Use the returned hook object or the old one
     promise = promise.then(updateCurrentHook);

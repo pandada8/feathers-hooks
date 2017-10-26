@@ -1,6 +1,6 @@
 import Proto from 'uberproto';
 import { hooks as utils } from 'feathers-commons';
-import { addHookTypes, processHooks, baseMixin, getHooks } from './commons';
+import { addHookTypes, processHooks, baseMixin, getHooks, traceObject, insertTrace } from './commons';
 
 function isPromise (result) {
   return typeof result !== 'undefined' &&
@@ -19,10 +19,10 @@ const indexes = {
 }
 
 function inheritStack (args, parentObject, action) {
-  const __stacks = parentObject ? parentObject.__stack : []
   const index = indexes[action]
-  if (index && args[index]) {
-    Object.assign(args[index], {__stacks })
+  if (index != undefined && args[index]) {
+    const traceObj = parentObject ? Object.assign({}, parentObject.__trace) : traceObj()
+    Object.assign(args[index], { __trace: traceObj })
   }
 }
 
@@ -85,15 +85,14 @@ function hookMixin (service) {
       // Create the hook object that gets passed through
       const hookObject = utils.hookObject(method, 'before', arguments, hookData);
       // HACK: we add a homebrew __stack here to help analysis the performance and spot the error
-      if (hookObject.params && hookObject.params.__stack) {
-        hookObject.__stacks = hookObject.params.__stacks
-        console.log('inherited from parent stack')
-        delete hookObject.params.__stacks
+      if (hookObject.params && hookObject.params.__trace) {
+        hookObject.__trace = hookObject.params.__trace
+        hookObject.__trace.inherited = true
+        delete hookObject.params.__trace
       } else {
-        hookObject.__stacks = []
+        hookObject.__trace = traceObject()
       }
       // FIXME: find a options to set tracing dynamically
-      hookObject.__tracing = true
 
       hookObject.service = patchService(hookObject.service, hookObject)
       const originalServiceFactory = hookObject.app.service
@@ -101,7 +100,8 @@ function hookMixin (service) {
         get(target, key) {
           if (key == 'service') {
             return function patchedService() {
-              return patchService(target[key].apply(target, arguments), hookObject)
+              const service = target[key].apply(target, arguments)
+              return patchService(service, hookObject)
             }
           }
           return target[key]
@@ -116,7 +116,8 @@ function hookMixin (service) {
         after: getHooks(app, this, 'after', method, true),
         error: getHooks(app, this, 'error', method, true)
       };
-
+      hookObject.__trace.start = process.hrtime()
+      insertTrace(hookObject, 'push')
       // Process all before hooks
       return processHooks.call(this, hooks.before, hookObject)
         // Use the hook object to call the original method
@@ -146,6 +147,7 @@ function hookMixin (service) {
             if (isPromise(result)) {
               result.then(data => callback(null, data), callback);
             }
+            insertTrace(hookObject, 'call')
           });
         })
         // Make a copy of hookObject from `before` hooks and update type
@@ -153,7 +155,15 @@ function hookMixin (service) {
         // Run through all `after` hooks
         .then(processHooks.bind(this, hooks.after))
         // Finally, return the result
-        .then(hookObject => hookObject.result)
+        .then(hookObject => {
+          insertTrace(hookObject, 'pop')
+          if (process.env.TRACE && !hookObject.__trace.inherited) {
+            console.log('--------------')
+            console.log(hookObject.__trace.stack.map(x => `${x.name} ${x.time ? (x.time[0] + x.time[1]/1e9) + 'ms' : ''}`).join('\n'))
+            console.log('==============')
+          }
+          return hookObject.result
+        })
         // Handle errors
         .catch(error => {
           const errorHook = Object.assign({}, error.hook || hookObject, {
